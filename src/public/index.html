@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>catscan</title>
+    <link rel="icon" type="image/png" href="/assets/catscan-logo.png">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand">
+        <img class="brand-logo" src="/assets/catscan-logo.png" alt="catscan">
+        <div class="brand-copy">
+          <h1 class="visually-hidden">catscan</h1>
+          <p id="statusText" class="status-text">Idle</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button id="rescanButton" type="button" disabled>Rescan</button>
+      </div>
+    </header>
+
+    <main class="app-shell">
+      <section class="control-band" aria-label="Scan controls">
+        <label class="path-field">
+          <span>Root</span>
+          <input id="rootInput" type="text" autocomplete="off" spellcheck="false">
+        </label>
+        <button id="scanButton" type="button">Scan</button>
+        <div id="rootChips" class="root-chips" aria-label="Suggested roots"></div>
+      </section>
+
+      <section id="scanProgress" class="scan-progress" aria-live="polite" hidden>
+        <div class="progress-heading">
+          <strong id="progressTitle">Scanning</strong>
+          <span id="progressStats"></span>
+        </div>
+        <div class="progress-track" aria-hidden="true">
+          <div id="progressBar" class="progress-bar"></div>
+        </div>
+        <div id="progressPath" class="progress-path"></div>
+      </section>
+
+      <section class="metric-grid" aria-label="Scan summary">
+        <div class="metric">
+          <span>Total</span>
+          <strong id="totalSize">0 B</strong>
+        </div>
+        <div class="metric">
+          <span>Entries</span>
+          <strong id="entryCount">0</strong>
+        </div>
+        <div class="metric">
+          <span>Status</span>
+          <strong id="scanStatus">Not scanned</strong>
+        </div>
+        <div class="metric">
+          <span>Selected</span>
+          <strong id="selectedSummary">0 B</strong>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <div class="visual-pane">
+          <div class="pane-heading">
+            <div>
+              <h2>File Squares</h2>
+              <span id="fileMapSummary" class="pane-subtitle"></span>
+            </div>
+            <span id="focusedPath" title=""></span>
+          </div>
+          <div id="treemap" class="treemap" aria-label="Storage treemap"></div>
+        </div>
+
+        <div class="table-pane">
+          <div class="pane-heading">
+            <div>
+              <h2 id="entryHeading">Files</h2>
+              <span id="entrySubheading" class="pane-subtitle"></span>
+            </div>
+            <div class="table-actions">
+              <div class="segmented" aria-label="Entry view">
+                <button id="treeButton" type="button" aria-pressed="true">Tree</button>
+                <button id="filesOnlyButton" type="button" aria-pressed="false">Files</button>
+                <button id="allEntriesButton" type="button" aria-pressed="false">All</button>
+              </div>
+              <button id="loadMoreButton" type="button" hidden>Load More</button>
+              <button id="cleanupButton" type="button" disabled>Move to Trash</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th class="check-col"></th>
+                  <th><button class="sort-button" data-sort="name" type="button">Name</button></th>
+                  <th class="percent-col"><button class="sort-button" data-sort="percentOfParent" type="button">Percent of Parent</button></th>
+                  <th><button class="sort-button" data-sort="type" type="button">Type</button></th>
+                  <th><button class="sort-button" data-sort="size" type="button">Size</button></th>
+                  <th class="action-col">Finder</th>
+                </tr>
+              </thead>
+              <tbody id="entryRows"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section id="errorPanel" class="error-panel" hidden>
+        <h2>Partial Results</h2>
+        <ul id="errorList"></ul>
+      </section>
+    </main>
+
+    <dialog id="confirmDialog">
+      <form method="dialog">
+        <h2>Move Selected Items to Trash?</h2>
+        <p id="confirmSummary"></p>
+        <ul id="confirmList"></ul>
+        <div class="dialog-actions">
+          <button value="cancel" type="submit">Cancel</button>
+          <button id="confirmCleanupButton" value="confirm" type="submit">Move to Trash</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
