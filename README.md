@@ -1,19 +1,26 @@
-# catscan
+<p align="center">
+  <img src="src/public/assets/catscan-logo.png" alt="catscan" width="520">
+</p>
 
-Local-first Mac disk usage viewer built with Spec Kit.
+catscan is a local-first Mac disk usage visualizer.
 
-The main view defaults to scanning `/` for the whole drive. It shows a tree view
-with percent-of-parent bars, a compact square mosaic, and optional Files/All
-modes for sorted file and entry pages.
+I made this because I could not find a good, simple way to see exactly what was
+taking up so much space on my MacBook, and I did not want to pay just to answer
+that question. catscan scans your drive locally, shows the largest files and
+folders visually, and lets you inspect the hierarchy before deciding what to
+delete.
+
+The main view can scan `/` for the whole drive. It shows a file structure tree
+with percent-of-parent bars and a compact square mosaic where file size is
+represented visually.
 
 During scans, the app shows live progress with entries scanned, files scanned,
 bytes discovered, errors, and the current path being traversed.
 
 Large full-drive scans keep the complete scan data server-side and render
-bounded pages in the browser. The square mosaic shows the largest files first,
-uses extension-based colors, and represents larger files with more square cells.
-The table can load additional sorted rows without sending the entire filesystem
-tree as one JSON response.
+bounded pages in the browser. The square mosaic uses extension-based colors and
+represents larger files with more square cells. The table loads sorted hierarchy
+pages without sending the entire filesystem tree as one JSON response.
 
 Each visible table row includes a Finder button that reveals that scanned item
 in Finder.
