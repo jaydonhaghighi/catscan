@@ -3,6 +3,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 import { applyCleanupToScan, createEntryMap, findEntryByPath, scanDirectory, validateCleanupPaths } from './scanner.js';
@@ -24,6 +26,7 @@ const DEFAULT_SCAN_LOG_INTERVAL_MS = 5_000;
 const DEFAULT_SCAN_LOG_ENTRY_INTERVAL = 100_000;
 const DEFAULT_ENTRY_PAGE_LIMIT = 500;
 const MAX_ENTRY_PAGE_LIMIT = 5_000;
+const execFileAsync = promisify(execFile);
 
 function memorySummary() {
   const usage = process.memoryUsage();
@@ -108,6 +111,7 @@ function scanSummary(scan, progress) {
     totalSize: scan.totalSize,
     entryCount: scan.entryCount,
     errorCount: scan.errorCount,
+    duplicatesSkipped: scan.duplicatesSkipped || progress?.duplicatesSkipped || 0,
     fileCount: progress?.filesScanned,
     directoryCount: progress?.directoriesScanned,
     startedAt: scan.startedAt,
@@ -130,6 +134,7 @@ function scanLogSummary(scan) {
     totalSize: scan.totalSize,
     entryCount: scan.entryCount,
     errorCount: scan.errorCount,
+    duplicatesSkipped: scan.duplicatesSkipped || 0,
     startedAt: scan.startedAt,
     completedAt: scan.completedAt
   };
@@ -468,6 +473,81 @@ function suggestedRoots(homePath) {
   ];
 }
 
+function parseDiskSpaceOutput(output, targetPath) {
+  const lines = String(output || '').trim().split(/\r?\n/).filter(Boolean);
+  if (lines.length < 2) {
+    const error = new Error('Disk space information was not available.');
+    error.statusCode = 502;
+    throw error;
+  }
+
+  const columns = lines[lines.length - 1].trim().split(/\s+/);
+  if (columns.length < 6) {
+    const error = new Error('Disk space information was not readable.');
+    error.statusCode = 502;
+    throw error;
+  }
+
+  const totalBytes = Number.parseInt(columns[1], 10) * 1024;
+  const freeBytes = Number.parseInt(columns[3], 10) * 1024;
+  if (!Number.isFinite(totalBytes) || !Number.isFinite(freeBytes)) {
+    const error = new Error('Disk space information was not readable.');
+    error.statusCode = 502;
+    throw error;
+  }
+
+  const usedBytes = Math.max(0, totalBytes - freeBytes);
+  return {
+    path: targetPath,
+    filesystem: columns[0],
+    mountPath: columns.slice(5).join(' '),
+    totalBytes,
+    usedBytes,
+    freeBytes,
+    usedPercent: totalBytes > 0 ? (usedBytes / totalBytes) * 100 : 0
+  };
+}
+
+async function readDiskSpace(rootPath) {
+  const targetPath = normalizePath(rootPath || '/');
+
+  try {
+    const { stdout } = await execFileAsync('df', ['-Pk', targetPath], {
+      timeout: 5_000,
+      maxBuffer: 1024 * 1024
+    });
+    return parseDiskSpaceOutput(stdout, targetPath);
+  } catch (error) {
+    if (error.statusCode) {
+      throw error;
+    }
+
+    const diskError = new Error('Disk space is unavailable for that path.');
+    diskError.statusCode = error.code === 'ENOENT' ? 400 : 502;
+    diskError.code = error.code || 'DISK_SPACE_UNAVAILABLE';
+    throw diskError;
+  }
+}
+
+async function openFullDiskAccessSettings() {
+  if (process.platform !== 'darwin') {
+    const error = new Error('Full Disk Access settings are only available on macOS.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const settingsUrl = 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles';
+  await execFileAsync('open', [settingsUrl], {
+    timeout: 5_000,
+    maxBuffer: 1024 * 1024
+  });
+
+  return {
+    opened: true,
+    settingsUrl
+  };
+}
+
 async function serveStatic(request, response, staticDir) {
   const requestUrl = new URL(request.url, 'http://127.0.0.1');
   const rawPath = decodeURIComponent(requestUrl.pathname);
@@ -508,6 +588,8 @@ export function createApp(options = {}) {
   const trashDir = options.trashDir;
   const scanDirectoryImpl = options.scanDirectoryImpl || scanDirectory;
   const revealPathImpl = options.revealPathImpl || revealPathInFinder;
+  const diskSpaceImpl = options.diskSpaceImpl || readDiskSpace;
+  const fullDiskAccessSettingsImpl = options.fullDiskAccessSettingsImpl || openFullDiskAccessSettings;
   const logger = options.logger === undefined ? console : options.logger;
   const scanLogIntervalMs = Number(options.scanLogIntervalMs || process.env.SCAN_LOG_INTERVAL_MS || DEFAULT_SCAN_LOG_INTERVAL_MS);
   const scanLogEntryInterval = Number(options.scanLogEntryInterval || process.env.SCAN_LOG_ENTRY_INTERVAL || DEFAULT_SCAN_LOG_ENTRY_INTERVAL);
@@ -522,7 +604,37 @@ export function createApp(options = {}) {
     };
   }
 
+  function runningScanJob() {
+    for (const job of scanJobs.values()) {
+      if (job.status === 'running') {
+        return job;
+      }
+    }
+
+    return null;
+  }
+
+  function clearFinishedScanState() {
+    scans.clear();
+
+    for (const [scanId, job] of scanJobs) {
+      if (job.status !== 'running') {
+        scanJobs.delete(scanId);
+      }
+    }
+  }
+
   function startScanJob(rootPath) {
+    const activeJob = runningScanJob();
+    if (activeJob) {
+      const error = new Error('A scan is already running. Wait for it to finish before starting another scan.');
+      error.statusCode = 409;
+      error.code = 'SCAN_ALREADY_RUNNING';
+      throw error;
+    }
+
+    clearFinishedScanState();
+
     const scanId = crypto.randomUUID();
     const now = new Date().toISOString();
     const job = {
@@ -540,6 +652,7 @@ export function createApp(options = {}) {
         filesScanned: 0,
         directoriesScanned: 0,
         errors: 0,
+        duplicatesSkipped: 0,
         bytesScanned: 0,
         currentPath: rootPath,
         startedAt: now,
@@ -583,6 +696,7 @@ export function createApp(options = {}) {
                 directoriesScanned: progress.directoriesScanned,
                 bytesScanned: progress.bytesScanned,
                 errors: progress.errors,
+                duplicatesSkipped: progress.duplicatesSkipped || 0,
                 currentPath: progress.currentPath,
                 elapsedMs: nowMs - job.startedAtMs,
                 ...memorySummary()
@@ -605,6 +719,7 @@ export function createApp(options = {}) {
           bytesScanned: scan.totalSize,
           entriesScanned: scan.entryCount,
           errors: scan.errorCount,
+          duplicatesSkipped: scan.duplicatesSkipped || 0,
           updatedAt: scan.completedAt
         };
       } catch (error) {
@@ -664,8 +779,24 @@ export function createApp(options = {}) {
         sendJson(response, 200, {
           token: sessionToken,
           homePath,
+          platform: process.platform,
           suggestedRoots: suggestedRoots(homePath)
         }, { logger, routeName: 'GET /api/session' });
+        return;
+      }
+
+      if (request.method === 'GET' && requestUrl.pathname === '/api/disk-space') {
+        assertSessionToken(request, sessionToken);
+        const diskSpace = await diskSpaceImpl(requestUrl.searchParams.get('path') || '/');
+        sendJson(response, 200, { diskSpace }, { logger, routeName: 'GET /api/disk-space' });
+        return;
+      }
+
+      if (request.method === 'POST' && requestUrl.pathname === '/api/full-disk-access-settings') {
+        assertLocalMutationRequest(request, sessionToken);
+        await readJsonBody(request);
+        const fullDiskAccess = await fullDiskAccessSettingsImpl();
+        sendJson(response, 200, { fullDiskAccess }, { logger, routeName: 'POST /api/full-disk-access-settings' });
         return;
       }
 

@@ -4,7 +4,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>catscan</title>
-    <link rel="icon" type="image/png" href="/assets/catscan-logo.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="/assets/catscan-favicon.png">
+    <link rel="apple-touch-icon" href="/assets/catscan-favicon.png">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@flaticon/flaticon-uicons@3.3.1/css/regular/rounded.css">
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
@@ -16,9 +18,6 @@
           <p id="statusText" class="status-text">Idle</p>
         </div>
       </div>
-      <div class="header-actions">
-        <button id="rescanButton" type="button" disabled>Rescan</button>
-      </div>
     </header>
 
     <main class="app-shell">
@@ -29,6 +28,29 @@
         </label>
         <button id="scanButton" type="button">Scan</button>
         <div id="rootChips" class="root-chips" aria-label="Suggested roots"></div>
+        <aside class="disk-space-card" aria-label="Drive space">
+          <div class="disk-space-heading">
+            <span>Drive Space</span>
+            <strong id="diskSpaceMount">--</strong>
+          </div>
+          <div class="disk-space-track" aria-hidden="true">
+            <span id="diskUsedBar"></span>
+          </div>
+          <dl class="disk-space-list">
+            <div>
+              <dt>Total Space</dt>
+              <dd id="diskTotalSpace">--</dd>
+            </div>
+            <div>
+              <dt>Space Used</dt>
+              <dd id="diskUsedSpace">--</dd>
+            </div>
+            <div>
+              <dt>Space Free</dt>
+              <dd id="diskFreeSpace">--</dd>
+            </div>
+          </dl>
+        </aside>
       </section>
 
       <section id="scanProgress" class="scan-progress" aria-live="polite" hidden>
@@ -40,25 +62,6 @@
           <div id="progressBar" class="progress-bar"></div>
         </div>
         <div id="progressPath" class="progress-path"></div>
-      </section>
-
-      <section class="metric-grid" aria-label="Scan summary">
-        <div class="metric">
-          <span>Total</span>
-          <strong id="totalSize">0 B</strong>
-        </div>
-        <div class="metric">
-          <span>Entries</span>
-          <strong id="entryCount">0</strong>
-        </div>
-        <div class="metric">
-          <span>Status</span>
-          <strong id="scanStatus">Not scanned</strong>
-        </div>
-        <div class="metric">
-          <span>Selected</span>
-          <strong id="selectedSummary">0 B</strong>
-        </div>
       </section>
 
       <section class="workspace">
@@ -74,18 +77,27 @@
         </div>
 
         <div class="table-pane">
+          <section class="metric-grid" aria-label="Scan summary">
+            <div class="metric">
+              <span>Total</span>
+              <strong id="totalSize">0 B</strong>
+            </div>
+            <div class="metric">
+              <span>Entries</span>
+              <strong id="entryCount">0</strong>
+            </div>
+            <div class="metric">
+              <span>Selected</span>
+              <strong id="selectedSummary">0 B</strong>
+            </div>
+          </section>
           <div class="pane-heading">
             <div>
-              <h2 id="entryHeading">Files</h2>
+              <h2 id="entryHeading">File Structure</h2>
               <span id="entrySubheading" class="pane-subtitle"></span>
             </div>
             <div class="table-actions">
-              <div class="segmented" aria-label="Entry view">
-                <button id="treeButton" type="button" aria-pressed="true">Tree</button>
-                <button id="filesOnlyButton" type="button" aria-pressed="false">Files</button>
-                <button id="allEntriesButton" type="button" aria-pressed="false">All</button>
-              </div>
-              <button id="loadMoreButton" type="button" hidden>Load More</button>
+              <button id="selectContentsButton" type="button" disabled>Select All</button>
               <button id="cleanupButton" type="button" disabled>Move to Trash</button>
             </div>
           </div>
@@ -96,8 +108,8 @@
                   <th class="check-col"></th>
                   <th><button class="sort-button" data-sort="name" type="button">Name</button></th>
                   <th class="percent-col"><button class="sort-button" data-sort="percentOfParent" type="button">Percent of Parent</button></th>
-                  <th><button class="sort-button" data-sort="type" type="button">Type</button></th>
-                  <th><button class="sort-button" data-sort="size" type="button">Size</button></th>
+                  <th class="type-col"><button class="sort-button" data-sort="type" type="button">Type</button></th>
+                  <th class="size-col"><button class="sort-button" data-sort="size" type="button">Size</button></th>
                   <th class="action-col">Finder</th>
                 </tr>
               </thead>
@@ -108,10 +120,20 @@
       </section>
 
       <section id="errorPanel" class="error-panel" hidden>
-        <h2>Partial Results</h2>
+        <div class="error-heading">
+          <div>
+            <h2>Partial Results</h2>
+            <p>Some files or folders could not be read. You can open macOS settings and decide whether to grant Full Disk Access.</p>
+          </div>
+          <button id="fullDiskAccessButton" type="button">Open Full Disk Access Settings</button>
+        </div>
         <ul id="errorList"></ul>
       </section>
     </main>
+
+    <footer class="app-footer">
+      Uicons by <a href="https://www.flaticon.com/uicons" target="_blank" rel="noreferrer">Flaticon</a>
+    </footer>
 
     <dialog id="confirmDialog">
       <form method="dialog">
@@ -121,6 +143,20 @@
         <div class="dialog-actions">
           <button value="cancel" type="submit">Cancel</button>
           <button id="confirmCleanupButton" value="confirm" type="submit">Move to Trash</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="fullAccessDialog">
+      <form method="dialog">
+        <h2>Full Disk Access</h2>
+        <p>
+          A full-drive scan needs macOS Full Disk Access to read protected folders. Open settings, allow access for the app running catscan, then run the scan again.
+        </p>
+        <div class="dialog-actions">
+          <button value="cancel" type="submit">Cancel</button>
+          <button id="scanAnywayButton" value="scan-anyway" type="submit">Scan Anyway</button>
+          <button id="openFullAccessFromDialogButton" value="open-settings" type="submit">Open Settings</button>
         </div>
       </form>
     </dialog>

@@ -18,7 +18,7 @@ tree as one JSON response.
 Each visible table row includes a Finder button that reveals that scanned item
 in Finder.
 
-## Run
+## Run In A Browser
 
 ```sh
 npm install
@@ -26,6 +26,46 @@ npm start
 ```
 
 Open the printed `http://127.0.0.1:5179` URL.
+
+## Run As A Mac App
+
+For local development, launch catscan in an Electron window:
+
+```sh
+npm install
+npm run desktop
+```
+
+To create a local `.app` bundle:
+
+```sh
+npm run pack:mac
+open dist/mac*/catscan.app
+```
+
+To create a DMG for sharing:
+
+```sh
+npm run dist:mac
+```
+
+This creates separate Apple Silicon and Intel builds. To build only one:
+
+```sh
+npm run dist:mac:arm64
+npm run dist:mac:x64
+```
+
+The generated app starts the local catscan server internally and opens the UI in
+its own window. Users do not need to run `npm start` or open a terminal.
+
+For full-drive scans on macOS, catscan can open Full Disk Access settings. macOS
+still requires the user to manually grant access to the catscan app, then restart
+catscan before scanning again.
+
+The local build is unsigned. A Mac may require right-clicking the app and
+choosing Open. For broad public distribution, sign and notarize the app with an
+Apple Developer ID.
 
 ## Logs
 

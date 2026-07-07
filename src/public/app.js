@@ -1,23 +1,26 @@
 import {
   calculateSelection,
+  createMosaicHitGrid,
   extensionColor,
+  folderMosaicLayout,
   formatPercent,
   formatBytes,
-  mosaicSquareLayout,
+  mosaicHitTest,
 } from './ui-data.js';
 
 const TABLE_PAGE_LIMIT = 500;
 const TILE_LIMIT = 5_000;
 let resizeFrame = 0;
+let diskSpaceTimer = 0;
+let diskSpaceRequestId = 0;
 
 const state = {
   token: null,
+  platform: 'unknown',
   scan: null,
-  entries: [],
   entryTotal: 0,
   tileEntries: [],
   tileTotal: 0,
-  entryMode: 'tree',
   selectedPaths: new Set(),
   selectedEntries: new Map(),
   expandedPaths: new Set(),
@@ -26,7 +29,8 @@ const state = {
   treeLoadingPaths: new Set(),
   sortKey: 'size',
   sortDirection: 'desc',
-  loadingEntries: false
+  loadingEntries: false,
+  selectingContents: false
 };
 
 const elements = {
@@ -34,15 +38,18 @@ const elements = {
   rootInput: document.querySelector('#rootInput'),
   rootChips: document.querySelector('#rootChips'),
   scanButton: document.querySelector('#scanButton'),
-  rescanButton: document.querySelector('#rescanButton'),
   scanProgress: document.querySelector('#scanProgress'),
   progressTitle: document.querySelector('#progressTitle'),
   progressStats: document.querySelector('#progressStats'),
   progressBar: document.querySelector('#progressBar'),
   progressPath: document.querySelector('#progressPath'),
+  diskSpaceMount: document.querySelector('#diskSpaceMount'),
+  diskTotalSpace: document.querySelector('#diskTotalSpace'),
+  diskUsedSpace: document.querySelector('#diskUsedSpace'),
+  diskFreeSpace: document.querySelector('#diskFreeSpace'),
+  diskUsedBar: document.querySelector('#diskUsedBar'),
   totalSize: document.querySelector('#totalSize'),
   entryCount: document.querySelector('#entryCount'),
-  scanStatus: document.querySelector('#scanStatus'),
   selectedSummary: document.querySelector('#selectedSummary'),
   treemap: document.querySelector('#treemap'),
   fileMapSummary: document.querySelector('#fileMapSummary'),
@@ -50,11 +57,12 @@ const elements = {
   entryHeading: document.querySelector('#entryHeading'),
   entrySubheading: document.querySelector('#entrySubheading'),
   entryRows: document.querySelector('#entryRows'),
-  treeButton: document.querySelector('#treeButton'),
-  filesOnlyButton: document.querySelector('#filesOnlyButton'),
-  allEntriesButton: document.querySelector('#allEntriesButton'),
-  loadMoreButton: document.querySelector('#loadMoreButton'),
+  selectContentsButton: document.querySelector('#selectContentsButton'),
   cleanupButton: document.querySelector('#cleanupButton'),
+  fullDiskAccessButton: document.querySelector('#fullDiskAccessButton'),
+  fullAccessDialog: document.querySelector('#fullAccessDialog'),
+  openFullAccessFromDialogButton: document.querySelector('#openFullAccessFromDialogButton'),
+  scanAnywayButton: document.querySelector('#scanAnywayButton'),
   errorPanel: document.querySelector('#errorPanel'),
   errorList: document.querySelector('#errorList'),
   confirmDialog: document.querySelector('#confirmDialog'),
@@ -62,6 +70,239 @@ const elements = {
   confirmList: document.querySelector('#confirmList'),
   confirmCleanupButton: document.querySelector('#confirmCleanupButton')
 };
+
+const ICON_CLASSES = {
+  archive: 'fi-rr-file-zipper',
+  audio: 'fi-rr-file-audio',
+  chevronDown: 'fi-rr-angle-small-down',
+  chevronRight: 'fi-rr-angle-small-right',
+  code: 'fi-rr-file-code',
+  database: 'fi-rr-database',
+  file: 'fi-rr-file',
+  finder: 'fi-rr-up-right-from-square',
+  folder: 'fi-rr-folder',
+  folderOpen: 'fi-rr-folder-open',
+  image: 'fi-rr-file-image',
+  pdf: 'fi-rr-file-pdf',
+  refresh: 'fi-rr-refresh',
+  root: 'fi-rr-hdd',
+  scan: 'fi-rr-barcode-scan',
+  scanning: 'fi-rr-rotate-right',
+  selectAll: 'fi-rr-checkbox',
+  status: 'fi-rr-check-circle',
+  total: 'fi-rr-hdd',
+  trash: 'fi-rr-trash',
+  unselectAll: 'fi-rr-square',
+  video: 'fi-rr-file-video'
+};
+
+function createUiIcon(name, className = '') {
+  const icon = document.createElement('i');
+  icon.className = ['fi', ICON_CLASSES[name] || ICON_CLASSES.file, className].filter(Boolean).join(' ');
+  icon.setAttribute('aria-hidden', 'true');
+  return icon;
+}
+
+function createFinderIcon(className = '') {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+  svg.setAttribute('class', className);
+  svg.innerHTML = [
+    '<rect x="3" y="3" width="18" height="18" rx="4" fill="#0a84ff"/>',
+    '<path d="M12 3h5a4 4 0 0 1 4 4v10a4 4 0 0 1-4 4h-5V3Z" fill="#f4f8ff"/>',
+    '<path d="M12 3v18" stroke="#101010" stroke-width="1.15" stroke-linecap="round"/>',
+    '<path d="M8.2 9.2h.01M15.8 9.2h.01" stroke="#101010" stroke-width="2.1" stroke-linecap="round"/>',
+    '<path d="M12 7.2c-.9 1.8-.9 3.6 0 5.4" stroke="#101010" stroke-width="1.15" stroke-linecap="round"/>',
+    '<path d="M7.2 15.2c1.3 1.25 2.9 1.85 4.8 1.85s3.5-.6 4.8-1.85" stroke="#101010" stroke-width="1.15" stroke-linecap="round"/>'
+  ].join('');
+  return svg;
+}
+
+function setButtonContent(button, iconName, label) {
+  button.replaceChildren(createUiIcon(iconName, 'button-icon'), document.createTextNode(label));
+}
+
+function hashText(value) {
+  let hash = 0;
+  for (const character of String(value || '')) {
+    hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+  }
+  return hash;
+}
+
+function hexToRgb(hex) {
+  const value = String(hex || '#ffffff').replace('#', '');
+  const normalized = value.length === 3
+    ? value.split('').map((character) => `${character}${character}`).join('')
+    : value.padEnd(6, 'f').slice(0, 6);
+  return {
+    r: Number.parseInt(normalized.slice(0, 2), 16),
+    g: Number.parseInt(normalized.slice(2, 4), 16),
+    b: Number.parseInt(normalized.slice(4, 6), 16)
+  };
+}
+
+function rgbToHex({ r, g, b }) {
+  return `#${[r, g, b].map((value) => Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, '0')).join('')}`;
+}
+
+function mixColor(color, target, amount) {
+  const sourceRgb = hexToRgb(color);
+  const targetRgb = hexToRgb(target);
+  return rgbToHex({
+    r: sourceRgb.r + (targetRgb.r - sourceRgb.r) * amount,
+    g: sourceRgb.g + (targetRgb.g - sourceRgb.g) * amount,
+    b: sourceRgb.b + (targetRgb.b - sourceRgb.b) * amount
+  });
+}
+
+function tileColor(entry) {
+  const baseColor = extensionColor(entry);
+  const variation = ((hashText(entry?.path || entry?.name) % 9) - 4) / 100;
+  return variation >= 0
+    ? mixColor(baseColor, '#ffffff', variation * 1.7)
+    : mixColor(baseColor, '#000000', Math.abs(variation) * 1.9);
+}
+
+function trimCanvasText(context, text, maxWidth) {
+  const value = String(text || '');
+  if (context.measureText(value).width <= maxWidth) {
+    return value;
+  }
+
+  let trimmed = value;
+  while (trimmed.length > 1 && context.measureText(`${trimmed}...`).width > maxWidth) {
+    trimmed = trimmed.slice(0, -1);
+  }
+  return `${trimmed}...`;
+}
+
+function drawTreemapCanvas(canvas, layout) {
+  const pixelRatio = Math.max(1, window.devicePixelRatio || 1);
+  canvas.width = Math.max(1, Math.round(layout.width * pixelRatio));
+  canvas.height = Math.max(1, Math.round(layout.height * pixelRatio));
+  canvas.style.width = `${layout.width}px`;
+  canvas.style.height = `${layout.height}px`;
+
+  const context = canvas.getContext('2d', { alpha: false });
+  context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  context.fillStyle = '#050505';
+  context.fillRect(0, 0, layout.width, layout.height);
+
+  for (const groupRect of layout.groups || []) {
+    const groupGradient = context.createLinearGradient(
+      groupRect.x,
+      groupRect.y,
+      groupRect.x,
+      groupRect.y + groupRect.height
+    );
+    groupGradient.addColorStop(0, '#151515');
+    groupGradient.addColorStop(1, '#080808');
+    context.fillStyle = groupGradient;
+    context.fillRect(groupRect.x, groupRect.y, groupRect.width, groupRect.height);
+
+    context.lineWidth = 2;
+    context.strokeStyle = '#000000';
+    context.strokeRect(
+      groupRect.x + 1,
+      groupRect.y + 1,
+      Math.max(0, groupRect.width - 2),
+      Math.max(0, groupRect.height - 2)
+    );
+
+    if (groupRect.showHeader) {
+      context.fillStyle = 'rgba(0, 0, 0, 0.3)';
+      context.fillRect(groupRect.x + 1, groupRect.y + 1, Math.max(0, groupRect.width - 2), 22);
+      context.font = '700 12px "Avenir Next", "Inter", sans-serif';
+      context.fillStyle = '#f4f4f4';
+      context.textBaseline = 'top';
+      const name = trimCanvasText(context, groupRect.group.name, Math.max(20, groupRect.width - 88));
+      context.fillText(name, groupRect.x + 8, groupRect.y + 5);
+
+      context.font = '600 10px "Avenir Next", "Inter", sans-serif';
+      context.fillStyle = '#9f9f9f';
+      const meta = trimCanvasText(
+        context,
+        `${formatBytes(groupRect.group.size)} / ${groupRect.fileCount}`,
+        Math.max(20, groupRect.width - 16)
+      );
+      context.fillText(meta, groupRect.x + Math.max(8, groupRect.width - context.measureText(meta).width - 8), groupRect.y + 6);
+    }
+  }
+
+  for (const rect of layout.rects) {
+    const color = tileColor(rect.entry);
+    const gradient = context.createLinearGradient(rect.x, rect.y, rect.x + rect.width, rect.y + rect.height);
+    gradient.addColorStop(0, mixColor(color, '#ffffff', 0.18));
+    gradient.addColorStop(0.55, color);
+    gradient.addColorStop(1, mixColor(color, '#000000', 0.22));
+    context.fillStyle = gradient;
+    context.fillRect(rect.x, rect.y, rect.width, rect.height);
+
+    if (rect.width >= 9 && rect.height >= 9) {
+      const highlightHeight = Math.max(1, Math.floor(rect.height * 0.22));
+      context.fillStyle = 'rgba(255, 255, 255, 0.08)';
+      context.fillRect(rect.x + 1, rect.y + 1, Math.max(0, rect.width - 2), highlightHeight);
+      context.fillStyle = 'rgba(0, 0, 0, 0.1)';
+      context.fillRect(rect.x + 1, rect.y + rect.height - highlightHeight - 1, Math.max(0, rect.width - 2), highlightHeight);
+    }
+
+    context.lineWidth = 0.65;
+    context.strokeStyle = '#000000';
+    context.strokeRect(rect.x + 0.25, rect.y + 0.25, Math.max(0, rect.width - 0.5), Math.max(0, rect.height - 0.5));
+  }
+}
+
+function describeTreemapRect(rect) {
+  return [
+    rect.entry.path,
+    rect.entry.extension || '',
+    rect.group?.name,
+    formatBytes(rect.entry.size)
+  ].filter(Boolean).join(' - ');
+}
+
+function eventPointInCanvas(event, canvas) {
+  const bounds = canvas.getBoundingClientRect();
+  const cssWidth = Number.parseFloat(canvas.style.width) || bounds.width || 1;
+  const cssHeight = Number.parseFloat(canvas.style.height) || bounds.height || 1;
+  const scaleX = bounds.width > 0 ? cssWidth / bounds.width : 1;
+  const scaleY = bounds.height > 0 ? cssHeight / bounds.height : 1;
+
+  return {
+    x: (event.clientX - bounds.left) * scaleX,
+    y: (event.clientY - bounds.top) * scaleY
+  };
+}
+
+function comparablePath(pathValue) {
+  const value = String(pathValue || '').trim();
+  if (!value || value === '/') {
+    return value;
+  }
+
+  return value.replace(/\/+$/, '') || '/';
+}
+
+function isCurrentRootScanned() {
+  return Boolean(
+    state.scan?.rootPath &&
+    comparablePath(elements.rootInput.value) === comparablePath(state.scan.rootPath)
+  );
+}
+
+function shouldPromptForFullDiskAccess(rootPath) {
+  return state.platform === 'darwin' && comparablePath(rootPath) === '/';
+}
+
+function updateScanButtonLabel() {
+  const isRescan = isCurrentRootScanned();
+  setButtonContent(elements.scanButton, isRescan ? 'refresh' : 'scan', isRescan ? 'Rescan' : 'Scan');
+  elements.scanButton.classList.toggle('is-rescan', isRescan);
+  elements.scanButton.setAttribute('aria-label', isRescan ? `Rescan ${state.scan.rootPath}` : 'Scan root path');
+}
 
 function setStatus(message) {
   elements.statusText.textContent = message;
@@ -92,6 +333,63 @@ async function api(path, options = {}) {
   }
 
   return body;
+}
+
+function renderDiskSpace(diskSpace, options = {}) {
+  if (options.loading) {
+    elements.diskSpaceMount.textContent = 'Loading';
+    elements.diskTotalSpace.textContent = '--';
+    elements.diskUsedSpace.textContent = '--';
+    elements.diskFreeSpace.textContent = '--';
+    elements.diskUsedBar.style.width = '0%';
+    return;
+  }
+
+  if (!diskSpace) {
+    elements.diskSpaceMount.textContent = 'Unavailable';
+    elements.diskSpaceMount.title = options.error || '';
+    elements.diskTotalSpace.textContent = '--';
+    elements.diskUsedSpace.textContent = '--';
+    elements.diskFreeSpace.textContent = '--';
+    elements.diskUsedBar.style.width = '0%';
+    return;
+  }
+
+  const usedPercent = Math.min(100, Math.max(0, Number(diskSpace.usedPercent || 0)));
+  elements.diskSpaceMount.textContent = diskSpace.mountPath || diskSpace.path || 'Drive';
+  elements.diskSpaceMount.title = diskSpace.mountPath || diskSpace.path || '';
+  elements.diskTotalSpace.textContent = formatBytes(diskSpace.totalBytes || 0);
+  elements.diskUsedSpace.textContent = formatBytes(diskSpace.usedBytes || 0);
+  elements.diskFreeSpace.textContent = formatBytes(diskSpace.freeBytes || 0);
+  elements.diskUsedBar.style.width = `${usedPercent}%`;
+}
+
+async function loadDiskSpace(rootPath) {
+  if (!state.token) {
+    return;
+  }
+
+  const requestId = ++diskSpaceRequestId;
+  const pathValue = rootPath || '/';
+  renderDiskSpace(null, { loading: true });
+
+  try {
+    const { diskSpace } = await api(`/api/disk-space?path=${encodeURIComponent(pathValue)}`);
+    if (requestId === diskSpaceRequestId) {
+      renderDiskSpace(diskSpace);
+    }
+  } catch (error) {
+    if (requestId === diskSpaceRequestId) {
+      renderDiskSpace(null, { error: error.message });
+    }
+  }
+}
+
+function scheduleDiskSpaceLoad(delay = 350) {
+  clearTimeout(diskSpaceTimer);
+  diskSpaceTimer = setTimeout(() => {
+    loadDiskSpace(elements.rootInput.value.trim() || '/');
+  }, delay);
 }
 
 function renderProgress(progress) {
@@ -148,13 +446,22 @@ async function pollScan(scanId) {
 function renderMetrics() {
   const scan = state.scan;
   const selection = calculateSelection([...state.selectedEntries.values()], state.selectedPaths);
+  const allTopContentsSelected = areTopFolderContentsSelected();
 
   elements.totalSize.textContent = formatBytes(scan?.totalSize || 0);
   elements.entryCount.textContent = String(scan?.entryCount || 0);
-  elements.scanStatus.textContent = scan ? scan.status : 'Not scanned';
   elements.selectedSummary.textContent = `${selection.itemCount} / ${formatBytes(selection.totalSize)}`;
   elements.cleanupButton.disabled = selection.itemCount === 0;
-  elements.rescanButton.disabled = !scan;
+  elements.selectContentsButton.disabled = !scan || Number(scan.root?.childCount || 0) === 0 || state.selectingContents;
+  const selectButtonLabel = state.selectingContents
+    ? allTopContentsSelected ? 'Unselecting' : 'Selecting'
+    : allTopContentsSelected ? 'Unselect All' : 'Select All';
+  setButtonContent(
+    elements.selectContentsButton,
+    allTopContentsSelected ? 'unselectAll' : 'selectAll',
+    selectButtonLabel
+  );
+  updateScanButtonLabel();
 }
 
 function renderErrors() {
@@ -180,7 +487,7 @@ function renderTreemap() {
 
   const files = state.tileEntries;
   elements.fileMapSummary.textContent = files.length > 0
-    ? `${files.length} of ${state.tileTotal} file${state.tileTotal === 1 ? '' : 's'}, largest first`
+    ? `${files.length} of ${state.tileTotal} file${state.tileTotal === 1 ? '' : 's'}, grouped by folder`
     : '';
 
   if (files.length === 0) {
@@ -193,36 +500,190 @@ function renderTreemap() {
 
   const bounds = elements.treemap.getBoundingClientRect();
   const styles = getComputedStyle(elements.treemap);
-  const cellSize = Number.parseFloat(styles.getPropertyValue('--tile-cell-size')) || 8;
-  const layout = mosaicSquareLayout(files, bounds.width, bounds.height, {
-    height: bounds.height,
-    cellSize
+  const cellSize = Number.parseFloat(styles.getPropertyValue('--tile-cell-size')) || 6;
+  const layout = folderMosaicLayout(files, state.scan?.rootPath || '/', bounds.width, bounds.height, {
+    cellSize,
+    headerHeight: 22,
+    maxGroups: 18,
+    padding: 4
   });
-  const spacer = document.createElement('div');
-  spacer.className = 'treemap-spacer';
-  spacer.style.height = `${layout.height}px`;
-  elements.treemap.append(spacer);
+  const hitGrid = createMosaicHitGrid(layout);
+  const canvas = document.createElement('canvas');
+  canvas.className = 'treemap-canvas';
+  canvas.setAttribute('role', 'img');
+  canvas.setAttribute('aria-label', `${files.length} file squares grouped across ${layout.groups.length} folders`);
+  canvas.tabIndex = 0;
 
-  layout.rects.forEach((rect) => {
-    const entry = rect.entry;
-    const tile = document.createElement('button');
-    tile.className = 'tile';
-    tile.type = 'button';
-    tile.style.setProperty('--tile-color', extensionColor(entry));
-    tile.style.left = `${rect.x}px`;
-    tile.style.top = `${rect.y}px`;
-    tile.style.width = `${rect.width}px`;
-    tile.style.height = `${rect.height}px`;
-    tile.title = `${entry.path} - ${entry.extension || ''} - ${formatBytes(entry.size)}`;
-    tile.setAttribute('aria-label', `${entry.name || entry.path}, ${formatBytes(entry.size)}`);
-    tile.addEventListener('click', () => focusEntry(entry));
-    elements.treemap.append(tile);
+  const hover = document.createElement('div');
+  hover.className = 'treemap-hover';
+  hover.hidden = true;
+
+  const tooltip = document.createElement('div');
+  tooltip.className = 'treemap-tooltip';
+  tooltip.hidden = true;
+
+  drawTreemapCanvas(canvas, layout);
+
+  let hoveredRect = null;
+  const setHoveredRect = (rect, point = null) => {
+    if (hoveredRect === rect) {
+      if (rect && point) {
+        tooltip.style.left = `${Math.min(layout.width - 16, point.x + 12)}px`;
+        tooltip.style.top = `${Math.min(layout.height - 16, point.y + 12)}px`;
+      }
+      return;
+    }
+
+    hoveredRect = rect;
+    if (!rect) {
+      hover.hidden = true;
+      tooltip.hidden = true;
+      canvas.removeAttribute('title');
+      return;
+    }
+
+    hover.hidden = false;
+    hover.style.left = `${rect.x}px`;
+    hover.style.top = `${rect.y}px`;
+    hover.style.width = `${rect.width}px`;
+    hover.style.height = `${rect.height}px`;
+    canvas.title = describeTreemapRect(rect);
+    tooltip.hidden = false;
+    tooltip.textContent = `${rect.entry.name || rect.entry.path} / ${formatBytes(rect.entry.size)} / ${rect.group?.name || ''}`;
+    if (point) {
+      tooltip.style.left = `${Math.min(layout.width - 16, point.x + 12)}px`;
+      tooltip.style.top = `${Math.min(layout.height - 16, point.y + 12)}px`;
+    }
+  };
+
+  canvas.addEventListener('pointermove', (event) => {
+    const point = eventPointInCanvas(event, canvas);
+    setHoveredRect(mosaicHitTest(layout, hitGrid, point.x, point.y), point);
   });
+  canvas.addEventListener('pointerleave', () => setHoveredRect(null));
+  canvas.addEventListener('click', (event) => {
+    const point = eventPointInCanvas(event, canvas);
+    const rect = mosaicHitTest(layout, hitGrid, point.x, point.y);
+    if (rect) {
+      focusEntry(rect.entry);
+    }
+  });
+  canvas.addEventListener('keydown', (event) => {
+    if ((event.key === 'Enter' || event.key === ' ') && hoveredRect) {
+      event.preventDefault();
+      focusEntry(hoveredRect.entry);
+    }
+  });
+
+  elements.treemap.append(canvas, hover, tooltip);
 }
 
 function focusEntry(entry) {
   elements.focusedPath.textContent = entry.path;
   elements.focusedPath.title = entry.path;
+}
+
+function isDescendantPath(parentPath, candidatePath) {
+  if (!parentPath || !candidatePath || parentPath === candidatePath) {
+    return false;
+  }
+
+  const normalizedParent = parentPath.endsWith('/') ? parentPath : `${parentPath}/`;
+  return candidatePath.startsWith(normalizedParent);
+}
+
+function selectedAncestorPath(entryPath) {
+  for (const selectedPath of state.selectedPaths) {
+    if (isDescendantPath(selectedPath, entryPath)) {
+      return selectedPath;
+    }
+  }
+
+  return null;
+}
+
+function removeSelectedDescendants(parentPath) {
+  for (const selectedPath of [...state.selectedPaths]) {
+    if (isDescendantPath(parentPath, selectedPath)) {
+      state.selectedPaths.delete(selectedPath);
+      state.selectedEntries.delete(selectedPath);
+    }
+  }
+}
+
+function removeSelectedBranch(entryPath) {
+  for (const selectedPath of [...state.selectedPaths]) {
+    if (selectedPath === entryPath || isDescendantPath(entryPath, selectedPath)) {
+      state.selectedPaths.delete(selectedPath);
+      state.selectedEntries.delete(selectedPath);
+    }
+  }
+}
+
+function selectEntryBranch(entry) {
+  removeSelectedDescendants(entry.path);
+  state.selectedPaths.add(entry.path);
+  state.selectedEntries.set(entry.path, entry);
+}
+
+function selectionStateForEntry(entry) {
+  const isDirect = state.selectedPaths.has(entry.path);
+  const inheritedFrom = selectedAncestorPath(entry.path);
+
+  return {
+    isDirect,
+    inheritedFrom,
+    isSelected: isDirect || Boolean(inheritedFrom)
+  };
+}
+
+function isDirectChildPath(parentPath, candidatePath) {
+  if (!parentPath || !candidatePath || parentPath === candidatePath) {
+    return false;
+  }
+
+  const normalizedParent = parentPath === '/' ? '/' : `${parentPath.replace(/\/+$/, '')}/`;
+  if (!candidatePath.startsWith(normalizedParent)) {
+    return false;
+  }
+
+  const remainder = candidatePath.slice(normalizedParent.length);
+  return Boolean(remainder) && !remainder.includes('/');
+}
+
+function areTopFolderContentsSelected() {
+  const rootPath = state.scan?.rootPath;
+  const rootChildCount = Number(state.scan?.root?.childCount || 0);
+  if (!rootPath || rootChildCount === 0) {
+    return false;
+  }
+
+  let selectedTopChildCount = 0;
+  for (const selectedPath of state.selectedPaths) {
+    if (isDirectChildPath(rootPath, selectedPath)) {
+      selectedTopChildCount += 1;
+    }
+  }
+
+  return selectedTopChildCount >= rootChildCount;
+}
+
+function unselectTopFolderContents() {
+  const rootPath = state.scan?.rootPath;
+  if (!rootPath) {
+    return 0;
+  }
+
+  let removed = 0;
+  for (const selectedPath of [...state.selectedPaths]) {
+    if (isDescendantPath(rootPath, selectedPath)) {
+      state.selectedPaths.delete(selectedPath);
+      state.selectedEntries.delete(selectedPath);
+      removed += 1;
+    }
+  }
+
+  return removed;
 }
 
 function resetTreeState() {
@@ -336,6 +797,57 @@ async function loadTreeChildren(parentPath, { append = false, render = true } = 
   }
 }
 
+async function fetchAllChildren(parentPath) {
+  const entries = [];
+  let total = 0;
+
+  do {
+    const page = await fetchChildren(parentPath, {
+      offset: entries.length,
+      limit: TABLE_PAGE_LIMIT
+    });
+    total = page.total;
+    entries.push(...page.entries);
+  } while (entries.length < total);
+
+  return entries;
+}
+
+async function selectTopFolderContents() {
+  if (!state.scan?.root?.path || state.selectingContents) {
+    return;
+  }
+
+  const shouldUnselect = areTopFolderContentsSelected();
+  state.selectingContents = true;
+  renderMetrics();
+  setStatus(shouldUnselect ? 'Unselecting folder contents' : 'Selecting folder contents');
+
+  try {
+    if (shouldUnselect) {
+      const removed = unselectTopFolderContents();
+      renderRows();
+      setStatus(`Unselected ${removed} item${removed === 1 ? '' : 's'}`);
+      return;
+    }
+
+    const entries = await fetchAllChildren(state.scan.root.path);
+    for (const entry of entries) {
+      if (entry.path !== state.scan.rootPath) {
+        selectEntryBranch(entry);
+      }
+    }
+
+    renderRows();
+    setStatus(`Selected ${entries.length} item${entries.length === 1 ? '' : 's'} from the top folder`);
+  } catch (error) {
+    setStatus(error.message);
+  } finally {
+    state.selectingContents = false;
+    renderMetrics();
+  }
+}
+
 async function toggleTreeEntry(entry) {
   if (!canExpandEntry(entry)) {
     focusEntry(entry);
@@ -363,84 +875,6 @@ function handleTreeToggle(entry) {
   toggleTreeEntry(entry).catch((error) => {
     setStatus(error.message);
   });
-}
-
-function createSvgIcon(name, className = '') {
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.setAttribute('viewBox', '0 0 24 24');
-  svg.setAttribute('aria-hidden', 'true');
-  svg.setAttribute('focusable', 'false');
-  if (className) {
-    svg.setAttribute('class', className);
-  }
-
-  const iconPaths = {
-    archive: [
-      '<path d="M6 3h12l2 4v13H4V7l2-4Z"/>',
-      '<path d="M4 7h16"/>',
-      '<path d="M10 3v4"/>',
-      '<path d="M14 3v4"/>',
-      '<path d="M11 11h2v2h-2z"/>',
-      '<path d="M11 15h2v2h-2z"/>'
-    ],
-    audio: [
-      '<path d="M9 18V6l10-2v12"/>',
-      '<circle cx="6" cy="18" r="3"/>',
-      '<circle cx="16" cy="16" r="3"/>'
-    ],
-    chevronDown: ['<path d="m7 10 5 5 5-5"/>'],
-    chevronRight: ['<path d="m9 6 6 6-6 6"/>'],
-    code: [
-      '<path d="m9 18-6-6 6-6"/>',
-      '<path d="m15 6 6 6-6 6"/>'
-    ],
-    database: [
-      '<ellipse cx="12" cy="5" rx="7" ry="3"/>',
-      '<path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/>',
-      '<path d="M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/>'
-    ],
-    file: [
-      '<path d="M14 3H6v18h12V7l-4-4Z"/>',
-      '<path d="M14 3v5h5"/>'
-    ],
-    finder: [
-      '<path d="M4 5h16v14H4z"/>',
-      '<path d="M12 5v14"/>',
-      '<path d="M8 10h.01"/>',
-      '<path d="M16 10h.01"/>',
-      '<path d="M8 15c1 1 2.3 1.5 4 1.5s3-.5 4-1.5"/>'
-    ],
-    folder: [
-      '<path d="M3 6h7l2 2h9v11H3z"/>',
-      '<path d="M3 8h18"/>'
-    ],
-    folderOpen: [
-      '<path d="M3 7h7l2 2h9v3"/>',
-      '<path d="M3 19 6 10h16l-3 9H3Z"/>'
-    ],
-    image: [
-      '<path d="M4 5h16v14H4z"/>',
-      '<circle cx="9" cy="10" r="1.5"/>',
-      '<path d="m7 17 4-5 3 3 2-2 3 4"/>'
-    ],
-    pdf: [
-      '<path d="M14 3H6v18h12V7l-4-4Z"/>',
-      '<path d="M14 3v5h5"/>',
-      '<path d="M8 16h8"/>'
-    ],
-    root: [
-      '<path d="M5 7h14l2 6H3l2-6Z"/>',
-      '<path d="M3 13v4h18v-4"/>',
-      '<path d="M7 16h.01"/>'
-    ],
-    video: [
-      '<path d="M4 6h12v12H4z"/>',
-      '<path d="m16 10 5-3v10l-5-3z"/>'
-    ]
-  };
-
-  svg.innerHTML = (iconPaths[name] || iconPaths.file).join('');
-  return svg;
 }
 
 function iconNameForEntry(entry) {
@@ -484,9 +918,8 @@ async function openInFinder(entry, button) {
     return;
   }
 
-  const previousText = button.textContent;
   button.disabled = true;
-  button.textContent = 'Opening';
+  button.classList.add('is-opening');
   setStatus('Opening in Finder');
 
   try {
@@ -502,7 +935,34 @@ async function openInFinder(entry, button) {
     setStatus(error.message);
   } finally {
     button.disabled = false;
-    button.textContent = previousText;
+    button.classList.remove('is-opening');
+  }
+}
+
+async function openFullDiskAccessSettings() {
+  if (elements.fullDiskAccessButton) {
+    elements.fullDiskAccessButton.disabled = true;
+  }
+  if (elements.openFullAccessFromDialogButton) {
+    elements.openFullAccessFromDialogButton.disabled = true;
+  }
+  setStatus('Opening Full Disk Access settings');
+
+  try {
+    await api('/api/full-disk-access-settings', {
+      method: 'POST',
+      body: JSON.stringify({})
+    });
+    setStatus('Full Disk Access settings opened');
+  } catch (error) {
+    setStatus(error.message);
+  } finally {
+    if (elements.fullDiskAccessButton) {
+      elements.fullDiskAccessButton.disabled = false;
+    }
+    if (elements.openFullAccessFromDialogButton) {
+      elements.openFullAccessFromDialogButton.disabled = false;
+    }
   }
 }
 
@@ -511,21 +971,7 @@ function visibleEntries() {
     return [];
   }
 
-  if (state.entryMode === 'tree') {
-    return buildVisibleTreeRows();
-  }
-
-  return state.entries;
-}
-
-function renderEntryModeControls() {
-  const filesOnly = state.entryMode === 'files';
-  const treeMode = state.entryMode === 'tree';
-  const allEntries = state.entryMode === 'all';
-  elements.treeButton.setAttribute('aria-pressed', String(treeMode));
-  elements.filesOnlyButton.setAttribute('aria-pressed', String(filesOnly));
-  elements.allEntriesButton.setAttribute('aria-pressed', String(allEntries));
-  elements.entryHeading.textContent = treeMode ? 'Tree' : filesOnly ? 'Files' : 'All Entries';
+  return buildVisibleTreeRows();
 }
 
 function defaultSortDirection(sortKey) {
@@ -552,23 +998,15 @@ function renderSortControls() {
 }
 
 function renderRows() {
-  elements.entryRows.replaceChildren();
-  renderEntryModeControls();
+  elements.entryHeading.textContent = 'File Structure';
   renderSortControls();
   const rows = visibleEntries();
-  const visibleEntryCount = state.entryMode === 'tree'
-    ? rows.filter((row) => row.kind === 'entry').length
-    : rows.length;
-  const rowLabel = state.entryMode === 'tree'
-    ? `entr${visibleEntryCount === 1 ? 'y' : 'ies'}`
-    : state.entryMode === 'files'
-    ? `file${visibleEntryCount === 1 ? '' : 's'}`
-    : `entr${visibleEntryCount === 1 ? 'y' : 'ies'}`;
+  const fragment = document.createDocumentFragment();
+  const visibleEntryCount = rows.filter((row) => row.kind === 'entry').length;
+  const rowLabel = `entr${visibleEntryCount === 1 ? 'y' : 'ies'}`;
   elements.entrySubheading.textContent = state.scan
     ? `${visibleEntryCount} of ${state.entryTotal} ${rowLabel}`
     : '';
-  elements.loadMoreButton.hidden = !state.scan || state.entryMode === 'tree' || rows.length >= state.entryTotal;
-  elements.loadMoreButton.disabled = state.loadingEntries;
 
   for (const rowEntry of rows) {
     if (rowEntry.kind === 'status' || rowEntry.kind === 'load-more') {
@@ -594,7 +1032,7 @@ function renderRows() {
       }
 
       row.append(cell);
-      elements.entryRows.append(row);
+      fragment.append(row);
       continue;
     }
 
@@ -609,79 +1047,76 @@ function renderRows() {
     if (entry.path === state.scan?.rootPath) {
       row.classList.add('is-root-entry');
     }
+    const entrySelection = selectionStateForEntry(entry);
+    if (entrySelection.isSelected) {
+      row.classList.add('is-selected');
+    }
+    if (entrySelection.inheritedFrom) {
+      row.classList.add('is-inherited-selection');
+    }
 
     const checkCell = document.createElement('td');
     const input = document.createElement('input');
     input.type = 'checkbox';
-    input.checked = state.selectedPaths.has(entry.path);
-    input.disabled = entry.path === state.scan?.rootPath;
+    input.checked = entrySelection.isSelected;
+    input.disabled = entry.path === state.scan?.rootPath || Boolean(entrySelection.inheritedFrom);
+    if (entrySelection.inheritedFrom) {
+      input.title = 'Selected by parent folder';
+    }
     input.addEventListener('click', (event) => {
       event.stopPropagation();
     });
     input.addEventListener('change', () => {
       if (input.checked) {
-        state.selectedPaths.add(entry.path);
-        state.selectedEntries.set(entry.path, entry);
+        selectEntryBranch(entry);
       } else {
-        state.selectedPaths.delete(entry.path);
-        state.selectedEntries.delete(entry.path);
+        removeSelectedBranch(entry.path);
       }
+      renderRows();
       renderMetrics();
     });
     checkCell.append(input);
 
     const nameCell = document.createElement('td');
-    nameCell.className = 'name-cell';
-    if (state.entryMode === 'tree') {
-      nameCell.classList.add('tree-name-cell');
-    }
+    nameCell.className = 'name-cell tree-name-cell';
     const name = document.createElement('div');
-    name.className = 'entry-name';
-    if (state.entryMode === 'tree') {
-      name.classList.add('is-tree-name');
-      if (entry.depth > 0) {
-        name.classList.add('has-parent');
-      }
+    name.className = 'entry-name is-tree-name';
+    if (entry.depth > 0) {
+      name.classList.add('has-parent');
     }
-    const treeIndent = state.entryMode === 'tree'
-      ? Math.min(Math.max(0, entry.depth), 12) * 18
-      : 0;
+    const treeIndent = Math.min(Math.max(0, entry.depth), 12) * 18;
     name.style.paddingLeft = `${treeIndent}px`;
     name.style.setProperty('--tree-indent', `${treeIndent}px`);
 
-    if (state.entryMode === 'tree') {
-      const toggle = document.createElement('button');
-      toggle.type = 'button';
-      toggle.className = 'tree-toggle';
-      toggle.disabled = !canExpandEntry(entry);
-      if (canExpandEntry(entry)) {
-        toggle.append(createSvgIcon(entry.isExpanded ? 'chevronDown' : 'chevronRight', 'tree-chevron'));
-      }
-      toggle.setAttribute('aria-label', `${entry.isExpanded ? 'Collapse' : 'Expand'} ${entry.name || entry.path}`);
-      toggle.setAttribute('aria-expanded', String(Boolean(entry.isExpanded)));
-      toggle.addEventListener('click', (event) => {
-        event.stopPropagation();
-        handleTreeToggle(entry);
-      });
-
-      const itemIconName = iconNameForEntry(entry);
-      const itemIcon = createSvgIcon(itemIconName, `tree-icon tree-icon-${itemIconName}`);
-      itemIcon.style.setProperty('--tree-icon-color', extensionColor(entry));
-
-      const nameText = document.createElement('span');
-      nameText.className = 'entry-name-text';
-      nameText.textContent = entry.name || entry.path;
-      name.append(toggle, itemIcon, nameText);
-    } else {
-      name.textContent = entry.name || entry.path;
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'tree-toggle';
+    toggle.disabled = !canExpandEntry(entry);
+    if (canExpandEntry(entry)) {
+      toggle.append(createUiIcon(entry.isExpanded ? 'chevronDown' : 'chevronRight', 'tree-chevron'));
     }
+    toggle.setAttribute('aria-label', `${entry.isExpanded ? 'Collapse' : 'Expand'} ${entry.name || entry.path}`);
+    toggle.setAttribute('aria-expanded', String(Boolean(entry.isExpanded)));
+    toggle.addEventListener('click', (event) => {
+      event.stopPropagation();
+      handleTreeToggle(entry);
+    });
+
+    const itemIconName = iconNameForEntry(entry);
+    const itemIcon = createUiIcon(itemIconName, `tree-icon tree-icon-${itemIconName}`);
+    itemIcon.style.setProperty('--tree-icon-color', extensionColor(entry));
+
+    const nameText = document.createElement('span');
+    nameText.className = 'entry-name-text';
+    nameText.textContent = entry.name || entry.path;
+    name.append(toggle, itemIcon, nameText);
 
     const entryPath = document.createElement('div');
     entryPath.className = 'entry-path';
     entryPath.textContent = entry.path;
     nameCell.append(name, entryPath);
     nameCell.addEventListener('click', () => {
-      if (state.entryMode === 'tree' && canExpandEntry(entry)) {
+      if (canExpandEntry(entry)) {
         handleTreeToggle(entry);
         return;
       }
@@ -690,9 +1125,7 @@ function renderRows() {
 
     const percentCell = document.createElement('td');
     percentCell.className = 'percent-cell';
-    percentCell.title = state.entryMode === 'tree'
-      ? 'Percent of the current folder'
-      : 'Percent of parent';
+    percentCell.title = 'Percent of the current folder';
     const percentBar = document.createElement('div');
     percentBar.className = 'percent-bar';
     const percentFill = document.createElement('span');
@@ -715,17 +1148,21 @@ function renderRows() {
     sizeCell.textContent = formatBytes(entry.size);
 
     const actionCell = document.createElement('td');
+    actionCell.className = 'action-cell';
     const finderButton = document.createElement('button');
     finderButton.type = 'button';
     finderButton.className = 'finder-button';
-    finderButton.textContent = 'Finder';
+    finderButton.title = 'Open in Finder';
     finderButton.setAttribute('aria-label', `Open ${entry.name || entry.path} in Finder`);
+    finderButton.append(createFinderIcon('finder-icon'));
     finderButton.addEventListener('click', () => openInFinder(entry, finderButton));
     actionCell.append(finderButton);
 
     row.append(checkCell, nameCell, percentCell, typeCell, sizeCell, actionCell);
-    elements.entryRows.append(row);
+    fragment.append(row);
   }
+
+  elements.entryRows.replaceChildren(fragment);
 }
 
 function renderAll() {
@@ -735,7 +1172,7 @@ function renderAll() {
     entryCount: state.scan?.entryCount,
     totalSize: state.scan?.totalSize,
     errorCount: state.scan?.errorCount,
-    visibleEntries: state.entries.length,
+    visibleEntries: visibleEntries().filter((row) => row.kind === 'entry').length,
     visibleTiles: state.tileEntries.length
   });
   renderMetrics();
@@ -744,7 +1181,7 @@ function renderAll() {
   renderErrors();
   logClientEvent('render.complete', {
     scanId: state.scan?.id,
-    entries: state.entries.length,
+    entries: visibleEntries().filter((row) => row.kind === 'entry').length,
     durationMs: Math.round(performance.now() - startedAt)
   });
 }
@@ -778,48 +1215,23 @@ async function loadTiles() {
   state.tileTotal = page.total;
 }
 
-async function loadEntries({ append = false } = {}) {
+async function loadEntries() {
   if (!state.scan) {
-    state.entries = [];
     state.entryTotal = 0;
     return;
   }
 
-  if (state.entryMode === 'tree') {
-    state.loadingEntries = true;
-    state.entryTotal = state.scan.entryCount || 0;
-    renderRows();
-
-    try {
-      if (!state.expandedPaths.has(state.scan.root.path)) {
-        state.expandedPaths.add(state.scan.root.path);
-      }
-
-      if (!append && !state.treeChildren.has(state.scan.root.path)) {
-        await loadTreeChildren(state.scan.root.path, { render: false });
-      }
-    } finally {
-      state.loadingEntries = false;
-      renderRows();
-      renderMetrics();
-    }
-    return;
-  }
-
   state.loadingEntries = true;
-  renderRows();
+  state.entryTotal = state.scan.entryCount || 0;
 
   try {
-    const page = await fetchEntries({
-      mode: state.entryMode,
-      sortKey: state.sortKey,
-      direction: state.sortDirection,
-      offset: append ? state.entries.length : 0,
-      limit: TABLE_PAGE_LIMIT
-    });
+    if (!state.expandedPaths.has(state.scan.root.path)) {
+      state.expandedPaths.add(state.scan.root.path);
+    }
 
-    state.entries = append ? [...state.entries, ...page.entries] : page.entries;
-    state.entryTotal = page.total;
+    if (!state.treeChildren.has(state.scan.root.path)) {
+      await loadTreeChildren(state.scan.root.path, { render: false });
+    }
   } finally {
     state.loadingEntries = false;
     renderRows();
@@ -835,15 +1247,21 @@ async function loadScanViews() {
   renderAll();
 }
 
-async function runScan() {
+async function runScan(options = {}) {
   const rootPath = elements.rootInput.value.trim();
   if (!rootPath) {
     setStatus('Enter a root path');
     return;
   }
 
+  if (!options.skipFullDiskAccessPrompt && shouldPromptForFullDiskAccess(rootPath)) {
+    elements.fullAccessDialog.showModal();
+    return;
+  }
+
   elements.scanButton.disabled = true;
-  elements.rescanButton.disabled = true;
+  setButtonContent(elements.scanButton, 'scanning', 'Scanning');
+  elements.scanButton.classList.remove('is-rescan');
   setStatus('Scanning');
   renderProgress({
     status: 'running',
@@ -870,11 +1288,12 @@ async function runScan() {
     focusEntry(scan.root);
     await loadScanViews();
     setStatus(scan.status === 'partial' ? 'Scan completed with partial results' : 'Scan completed');
+    loadDiskSpace(scan.rootPath).catch(() => {});
   } catch (error) {
     setStatus(error.message);
   } finally {
     elements.scanButton.disabled = false;
-    elements.rescanButton.disabled = !state.scan;
+    updateScanButtonLabel();
   }
 }
 
@@ -924,6 +1343,7 @@ async function runCleanup() {
     state.selectedEntries.clear();
     resetTreeState();
     await loadScanViews();
+    loadDiskSpace(state.scan.rootPath).catch(() => {});
     setStatus(operation.failed.length > 0 ? 'Cleanup completed with failures' : 'Cleanup completed');
   } catch (error) {
     setStatus(error.message);
@@ -933,10 +1353,17 @@ async function runCleanup() {
 }
 
 async function initialize() {
+  setButtonContent(elements.cleanupButton, 'trash', 'Move to Trash');
+  setButtonContent(elements.confirmCleanupButton, 'trash', 'Move to Trash');
+  setButtonContent(elements.openFullAccessFromDialogButton, 'root', 'Open Settings');
+  setButtonContent(elements.scanAnywayButton, 'scan', 'Scan Anyway');
+
   try {
     const session = await api('/api/session');
     state.token = session.token;
+    state.platform = session.platform || 'unknown';
     elements.rootInput.value = session.suggestedRoots[0]?.path || '/';
+    loadDiskSpace(elements.rootInput.value).catch(() => {});
 
     for (const root of session.suggestedRoots) {
       const button = document.createElement('button');
@@ -944,6 +1371,8 @@ async function initialize() {
       button.textContent = root.label;
       button.addEventListener('click', () => {
         elements.rootInput.value = root.path;
+        updateScanButtonLabel();
+        scheduleDiskSpaceLoad(0);
       });
       elements.rootChips.append(button);
     }
@@ -957,11 +1386,30 @@ async function initialize() {
 }
 
 elements.scanButton.addEventListener('click', runScan);
-elements.rescanButton.addEventListener('click', runScan);
+elements.rootInput.addEventListener('input', () => {
+  updateScanButtonLabel();
+  scheduleDiskSpaceLoad();
+});
+elements.selectContentsButton.addEventListener('click', () => {
+  selectTopFolderContents();
+});
 elements.cleanupButton.addEventListener('click', openCleanupDialog);
+elements.fullDiskAccessButton.addEventListener('click', () => {
+  openFullDiskAccessSettings();
+});
 elements.confirmDialog.addEventListener('close', () => {
   if (elements.confirmDialog.returnValue === 'confirm') {
     runCleanup();
+  }
+});
+elements.fullAccessDialog.addEventListener('close', () => {
+  if (elements.fullAccessDialog.returnValue === 'open-settings') {
+    openFullDiskAccessSettings();
+    return;
+  }
+
+  if (elements.fullAccessDialog.returnValue === 'scan-anyway') {
+    runScan({ skipFullDiskAccessPrompt: true });
   }
 });
 
@@ -974,9 +1422,8 @@ document.querySelectorAll('.sort-button').forEach((button) => {
       state.sortKey = key;
       state.sortDirection = defaultSortDirection(key);
     }
-    if (state.entryMode === 'tree') {
-      resetTreeState();
-    }
+    resetTreeState();
+    renderSortControls();
     if (state.scan) {
       try {
         await loadEntries();
@@ -987,60 +1434,6 @@ document.querySelectorAll('.sort-button').forEach((button) => {
       renderRows();
     }
   });
-});
-
-elements.treeButton.addEventListener('click', async () => {
-  state.entryMode = 'tree';
-  state.sortKey = 'size';
-  state.sortDirection = 'desc';
-  resetTreeState();
-  if (state.scan) {
-    try {
-      await loadEntries();
-    } catch (error) {
-      setStatus(error.message);
-    }
-  } else {
-    renderRows();
-  }
-});
-
-elements.filesOnlyButton.addEventListener('click', async () => {
-  state.entryMode = 'files';
-  state.sortKey = 'size';
-  state.sortDirection = 'desc';
-  if (state.scan) {
-    try {
-      await loadEntries();
-    } catch (error) {
-      setStatus(error.message);
-    }
-  } else {
-    renderRows();
-  }
-});
-
-elements.allEntriesButton.addEventListener('click', async () => {
-  state.entryMode = 'all';
-  state.sortKey = 'size';
-  state.sortDirection = 'desc';
-  if (state.scan) {
-    try {
-      await loadEntries();
-    } catch (error) {
-      setStatus(error.message);
-    }
-  } else {
-    renderRows();
-  }
-});
-
-elements.loadMoreButton.addEventListener('click', async () => {
-  try {
-    await loadEntries({ append: true });
-  } catch (error) {
-    setStatus(error.message);
-  }
 });
 
 window.addEventListener('resize', () => {

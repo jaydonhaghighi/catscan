@@ -3,12 +3,15 @@ import assert from 'node:assert/strict';
 
 import {
   calculateSelection,
+  createMosaicHitGrid,
   extensionColor,
   extensionKey,
   fileEntries,
   flattenEntries,
+  folderMosaicLayout,
   formatPercent,
   formatBytes,
+  mosaicHitTest,
   mosaicSquareLayout,
   packedTreemapLayout,
   squareTileSpan,
@@ -168,6 +171,50 @@ test('mosaicSquareLayout fills the panel and makes larger files larger squares',
   assert.ok(primarySideByPath.get('/large.zip') > primarySideByPath.get('/medium.py'));
 });
 
+test('mosaic hit grid maps canvas points back to file squares', () => {
+  const entries = [
+    { path: '/huge.bin', name: 'huge.bin', size: 10_000 },
+    { path: '/large.zip', name: 'large.zip', size: 4_000 },
+    { path: '/medium.py', name: 'medium.py', size: 1_000 },
+    { path: '/small.txt', name: 'small.txt', size: 10 }
+  ];
+  const layout = mosaicSquareLayout(entries, 160, 96, { cellSize: 8 });
+  const hitGrid = createMosaicHitGrid(layout);
+  const primaryRect = layout.rects.find((rect) => rect.role === 'primary' && rect.entry.path === '/huge.bin');
+
+  assert.ok(primaryRect);
+  assert.equal(
+    mosaicHitTest(layout, hitGrid, primaryRect.x + 1, primaryRect.y + 1).entry.path,
+    '/huge.bin'
+  );
+  assert.equal(mosaicHitTest(layout, hitGrid, -1, 0), null);
+  assert.equal(mosaicHitTest(layout, hitGrid, layout.width + 1, 0), null);
+  assert.equal(mosaicHitTest(layout, hitGrid, 0, layout.height + 1), null);
+});
+
+test('folderMosaicLayout groups files by top-level folder and keeps file squares bounded', () => {
+  const entries = [
+    { path: '/scan/videos/movie.mov', name: 'movie.mov', type: 'file', extension: '.mov', size: 9_000 },
+    { path: '/scan/videos/clip.mp4', name: 'clip.mp4', type: 'file', extension: '.mp4', size: 3_000 },
+    { path: '/scan/docs/report.pdf', name: 'report.pdf', type: 'file', extension: '.pdf', size: 1_500 },
+    { path: '/scan/root.zip', name: 'root.zip', type: 'file', extension: '.zip', size: 1_000 }
+  ];
+  const layout = folderMosaicLayout(entries, '/scan', 360, 240, { cellSize: 6 });
+
+  assert.equal(layout.groups.length, 3);
+  assert.deepEqual(layout.groups.map((group) => group.group.name), ['videos', 'docs', 'Root files']);
+  assert.equal(layout.rects.length, 4);
+
+  for (const rect of layout.rects) {
+    assert.equal(rect.width, rect.height);
+    assert.ok(rect.x >= 0);
+    assert.ok(rect.y >= 0);
+    assert.ok(rect.x + rect.width <= layout.width + 0.001);
+    assert.ok(rect.y + rect.height <= layout.height + 0.001);
+    assert.ok(rect.group);
+  }
+});
+
 test('formatBytes formats byte values', () => {
   assert.equal(formatBytes(512), '512 B');
   assert.equal(formatBytes(1536), '1.5 KB');
@@ -181,9 +228,9 @@ test('extensionKey extracts extensions and handles folders', () => {
 });
 
 test('extensionColor maps known extensions to stable colors', () => {
-  assert.equal(extensionColor({ name: 'archive.zip', type: 'file' }), '#4f8cff');
-  assert.equal(extensionColor({ name: 'script.py', type: 'file' }), '#f2c94c');
-  assert.equal(extensionColor({ name: 'Folder', type: 'directory' }), '#64748b');
+  assert.equal(extensionColor({ name: 'archive.zip', type: 'file' }), '#3b82f6');
+  assert.equal(extensionColor({ name: 'script.py', type: 'file' }), '#ffd166');
+  assert.equal(extensionColor({ name: 'Folder', type: 'directory' }), '#7a8190');
 });
 
 test('formatPercent formats small and large percentages', () => {

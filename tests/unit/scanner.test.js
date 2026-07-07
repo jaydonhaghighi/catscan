@@ -75,6 +75,37 @@ test('scanDirectory reports symlinks without following them', async (t) => {
   assert.equal(entryMap.has(path.join(linkPath, 'outside.bin')), false);
 });
 
+test('scanDirectory does not double-count hard-linked files', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'disk-viewer-hardlink-'));
+  const originalPath = path.join(root, 'original.bin');
+  const linkedPath = path.join(root, 'linked.bin');
+  const updates = [];
+
+  await fs.writeFile(originalPath, Buffer.alloc(42));
+
+  try {
+    await fs.link(originalPath, linkedPath);
+  } catch (error) {
+    if (error.code === 'EPERM' || error.code === 'EXDEV') {
+      t.skip('hard link creation is not permitted in this environment');
+      return;
+    }
+    throw error;
+  }
+
+  const scan = await scanDirectory(root, {
+    onProgress: (progress) => updates.push(progress)
+  });
+  const entryMap = createEntryMap(scan);
+  const indexedHardLinks = [originalPath, linkedPath].filter((candidate) => entryMap.has(candidate));
+
+  assert.equal(scan.totalSize, 42);
+  assert.equal(scan.duplicatesSkipped, 1);
+  assert.equal(scan.root.childCount, 1);
+  assert.equal(indexedHardLinks.length, 1);
+  assert.equal(updates.at(-1).duplicatesSkipped, 1);
+});
+
 test('validateCleanupPaths rejects paths outside the active scan root', async () => {
   const root = await makeFixture();
   const scan = await scanDirectory(root);

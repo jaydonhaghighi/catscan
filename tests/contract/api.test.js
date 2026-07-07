@@ -49,6 +49,78 @@ test('GET /api/health and /api/session return local runtime metadata', async () 
   }
 });
 
+test('GET /api/disk-space returns capacity for a path', async () => {
+  const app = await startTestApp({
+    diskSpaceImpl: async (rootPath) => ({
+      path: rootPath,
+      filesystem: '/dev/test',
+      mountPath: '/Volumes/Test',
+      totalBytes: 1000,
+      usedBytes: 700,
+      freeBytes: 300,
+      usedPercent: 70
+    })
+  });
+
+  try {
+    const response = await fetch(`${app.baseUrl}/api/disk-space?path=${encodeURIComponent('/tmp')}`, {
+      headers: {
+        'x-disk-viewer-token': 'test-token'
+      }
+    });
+
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.deepEqual(body.diskSpace, {
+      path: '/tmp',
+      filesystem: '/dev/test',
+      mountPath: '/Volumes/Test',
+      totalBytes: 1000,
+      usedBytes: 700,
+      freeBytes: 300,
+      usedPercent: 70
+    });
+  } finally {
+    await app.close();
+  }
+});
+
+test('POST /api/full-disk-access-settings opens macOS privacy settings', async () => {
+  let opened = false;
+  const app = await startTestApp({
+    fullDiskAccessSettingsImpl: async () => {
+      opened = true;
+      return {
+        opened: true,
+        settingsUrl: 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles'
+      };
+    }
+  });
+
+  try {
+    const response = await fetch(`${app.baseUrl}/api/full-disk-access-settings`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-disk-viewer-token': 'test-token',
+        origin: app.baseUrl
+      },
+      body: JSON.stringify({})
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(opened, true);
+    assert.deepEqual(await response.json(), {
+      fullDiskAccess: {
+        opened: true,
+        settingsUrl: 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles'
+      }
+    });
+  } finally {
+    await app.close();
+  }
+});
+
 test('POST /api/scan returns aggregate scan results', async () => {
   const root = await makeFixture();
   const app = await startTestApp();
@@ -287,6 +359,87 @@ test('POST /api/scan/start and GET progress return scan progress', async () => {
     assert.equal(progressBody.scan.totalSize, 20);
     assert.equal(progressBody.progress.entriesScanned, progressBody.scan.entryCount);
   } finally {
+    await app.close();
+  }
+});
+
+test('POST /api/scan/start rejects a second concurrent scan', async () => {
+  const root = await makeFixture();
+  let finishScan;
+  const scanStarted = new Promise((resolve) => {
+    finishScan = resolve;
+  });
+  const app = await startTestApp({
+    scanDirectoryImpl: async (rootPath, options = {}) => {
+      const now = new Date().toISOString();
+      options.onProgress?.({
+        scanId: options.scanId,
+        rootPath,
+        status: 'running',
+        phase: 'Scanning',
+        entriesScanned: 1,
+        filesScanned: 0,
+        directoriesScanned: 1,
+        errors: 0,
+        bytesScanned: 0,
+        currentPath: rootPath,
+        startedAt: now,
+        updatedAt: now
+      });
+      await scanStarted;
+      return {
+        id: options.scanId,
+        rootPath,
+        status: 'completed',
+        totalSize: 0,
+        entryCount: 1,
+        errorCount: 0,
+        startedAt: now,
+        completedAt: new Date().toISOString(),
+        root: {
+          id: 'root',
+          path: rootPath,
+          name: path.basename(rootPath),
+          type: 'directory',
+          size: 0,
+          ownSize: 0,
+          childCount: 0,
+          children: [],
+          partial: false,
+          errors: []
+        },
+        errors: []
+      };
+    }
+  });
+
+  try {
+    const firstResponse = await fetch(`${app.baseUrl}/api/scan/start`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-disk-viewer-token': 'test-token',
+        origin: app.baseUrl
+      },
+      body: JSON.stringify({ rootPath: root })
+    });
+    assert.equal(firstResponse.status, 202);
+
+    const secondResponse = await fetch(`${app.baseUrl}/api/scan/start`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-disk-viewer-token': 'test-token',
+        origin: app.baseUrl
+      },
+      body: JSON.stringify({ rootPath: root })
+    });
+
+    assert.equal(secondResponse.status, 409);
+    const body = await secondResponse.json();
+    assert.equal(body.error.code, 'SCAN_ALREADY_RUNNING');
+  } finally {
+    finishScan();
     await app.close();
   }
 });

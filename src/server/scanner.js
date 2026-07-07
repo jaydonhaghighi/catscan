@@ -29,6 +29,18 @@ function typeFromStats(stats) {
   return 'other';
 }
 
+function inodeKey(stats, type) {
+  if (type !== 'directory' && type !== 'file') {
+    return null;
+  }
+
+  if (!Number.isFinite(stats.dev) || !Number.isFinite(stats.ino)) {
+    return null;
+  }
+
+  return `${type}:${stats.dev}:${stats.ino}`;
+}
+
 function createScanError(entryPath, error) {
   return {
     path: entryPath,
@@ -75,6 +87,7 @@ function createProgress(scanId, rootPath) {
     filesScanned: 0,
     directoriesScanned: 0,
     errors: 0,
+    duplicatesSkipped: 0,
     bytesScanned: 0,
     currentPath: rootPath,
     startedAt: now,
@@ -97,13 +110,20 @@ function updateProgressForEntry(progress, entryPath, type, size) {
   }
 }
 
+function updateProgressForDuplicate(progress, entryPath) {
+  progress.entriesScanned += 1;
+  progress.duplicatesSkipped += 1;
+  progress.currentPath = entryPath;
+  progress.updatedAt = new Date().toISOString();
+}
+
 function updateProgressForError(progress, entryPath) {
   progress.errors += 1;
   progress.currentPath = entryPath;
   progress.updatedAt = new Date().toISOString();
 }
 
-async function scanEntry(entryPath, scanId, progress, reportProgress) {
+async function scanEntry(entryPath, scanId, progress, reportProgress, context) {
   let stats;
 
   try {
@@ -118,6 +138,17 @@ async function scanEntry(entryPath, scanId, progress, reportProgress) {
   }
 
   const type = typeFromStats(stats);
+  const key = inodeKey(stats, type);
+  if (key && context.seenInodes.has(key)) {
+    updateProgressForDuplicate(progress, entryPath);
+    reportProgress();
+    return { entry: null, errors: [] };
+  }
+
+  if (key) {
+    context.seenInodes.add(key);
+  }
+
   const ownSize = type === 'directory' ? 0 : sizeFromStats(stats);
   updateProgressForEntry(progress, entryPath, type, ownSize);
   reportProgress();
@@ -155,7 +186,7 @@ async function scanEntry(entryPath, scanId, progress, reportProgress) {
 
   for (const dirent of dirents) {
     const childPath = path.join(entryPath, dirent.name);
-    const childResult = await scanEntry(childPath, scanId, progress, reportProgress);
+    const childResult = await scanEntry(childPath, scanId, progress, reportProgress, context);
 
     if (childResult.entry) {
       entry.children.push(childResult.entry);
@@ -188,6 +219,9 @@ export async function scanDirectory(rootPath, options = {}) {
   const startedAt = new Date().toISOString();
   const progress = createProgress(scanId, absoluteRoot);
   const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {};
+  const context = {
+    seenInodes: new Set()
+  };
   let lastReportedAt = 0;
   const reportProgress = (force = false) => {
     const now = Date.now();
@@ -200,7 +234,7 @@ export async function scanDirectory(rootPath, options = {}) {
   };
 
   reportProgress(true);
-  const result = await scanEntry(absoluteRoot, scanId, progress, reportProgress);
+  const result = await scanEntry(absoluteRoot, scanId, progress, reportProgress, context);
   const root = result.entry;
   progress.phase = 'Collecting scan errors';
   progress.updatedAt = new Date().toISOString();
@@ -225,6 +259,7 @@ export async function scanDirectory(rootPath, options = {}) {
     totalSize: root.size,
     entryCount,
     errorCount: errors.length,
+    duplicatesSkipped: progress.duplicatesSkipped,
     root,
     errors
   };
